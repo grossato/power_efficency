@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.cache/
+.streamlit/
+*.parquet
+*.feather
+.pytest_cache/
