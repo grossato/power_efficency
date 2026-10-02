@@ -114,7 +114,7 @@ st.sidebar.subheader("1. Data Ingestion")
 data_mode = st.sidebar.radio(
     "Data Source",
     options=[
-        "Garmin Connect (Cloud)",
+        "Garmin Connect",
         "Upload .FIT Files (Direct)",
         "Intervals.icu API",
         "Demo / Synthetic Data",
@@ -340,7 +340,7 @@ corr_df = st.session_state.get("corr_df")
 
 if raw_df is None or gam_results is None:
     st.info(
-        "👋 Welcome! Please enter your **Intervals.icu API credentials** or click **'⚡ Generate Demo Data'** in the sidebar to start."
+        "👋 Welcome! Please enter your **preferred input method** or click **'⚡ Generate Demo Data'** in the sidebar to start."
     )
     # Quick launch button in main area
     if st.button("🚀 Quick Launch with Demo Data", type="primary"):
