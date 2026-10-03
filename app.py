@@ -1,26 +1,59 @@
 """Streamlit Application for Best BG Performance Modeling & Visualization."""
 
 from datetime import date, datetime, timedelta
+import json
 import logging
+from pathlib import Path
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-from data_processor import clean_and_shift_data, estimate_pooled_cgm_lag
+from data_processor import (
+    clean_and_shift_data,
+    clear_active_cache as dp_clear_active_cache,
+    estimate_pooled_cgm_lag,
+    load_active_cache,
+    save_active_cache as dp_save_active_cache,
+)
 from fit_parser import parse_fit_activity
 from gam_engine import BGPerformanceGAM
 from garmin_client import GarminClient
 from intervals_client import IntervalsClient
 from visualizer import (
+    plot_activity_power_bg_timeline,
+    plot_empirical_binned_power_curves,
     plot_gam_heatmap,
     plot_lag_correlation,
     plot_multi_bg_power_curves,
     plot_optimal_bg_curve,
+    plot_power_duration_by_bg,
+    plot_power_over_elapsed_time_by_bg,
 )
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def save_active_cache(
+    df: pd.DataFrame,
+    source: str,
+    initial_lag: int = 10,
+    corr_df: Optional[pd.DataFrame] = None,
+):
+    """Persist dataset to disk and sync cache metadata with streamlit session state."""
+    meta = dp_save_active_cache(df, source=source, initial_lag=initial_lag, corr_df=corr_df)
+    if meta and "cache_metadata" in st.session_state:
+        st.session_state["cache_metadata"] = meta
+    return meta
+
+
+def clear_active_cache():
+    """Clear active cache on disk and in session state."""
+    dp_clear_active_cache()
+
+
 
 # Streamlit Page Config
 st.set_page_config(
@@ -53,29 +86,6 @@ st.markdown(
 )
 
 
-def init_session_state():
-    """Initialize Streamlit session state variables."""
-    if "raw_df" not in st.session_state:
-        st.session_state["raw_df"] = None
-    if "corr_df" not in st.session_state:
-        st.session_state["corr_df"] = pd.DataFrame()
-    if "initial_lag" not in st.session_state:
-        st.session_state["initial_lag"] = 10
-    if "current_lag" not in st.session_state:
-        st.session_state["current_lag"] = 10
-    if "clean_df" not in st.session_state:
-        st.session_state["clean_df"] = None
-    if "gam_results" not in st.session_state:
-        st.session_state["gam_results"] = None
-    if "last_processed_lag" not in st.session_state:
-        st.session_state["last_processed_lag"] = None
-    if "data_source" not in st.session_state:
-        st.session_state["data_source"] = "None"
-
-
-init_session_state()
-
-
 def run_pipeline(raw_df: pd.DataFrame, lag_minutes: int):
     """Clean data with specified lag and fit GAM model."""
     if raw_df is None or raw_df.empty:
@@ -103,6 +113,47 @@ def run_pipeline(raw_df: pd.DataFrame, lag_minutes: int):
             logger.exception("GAM fitting failed")
 
 
+def init_session_state():
+    """Initialize Streamlit session state variables and auto-restore previous dataset."""
+    if "raw_df" not in st.session_state:
+        st.session_state["raw_df"] = None
+    if "corr_df" not in st.session_state:
+        st.session_state["corr_df"] = pd.DataFrame()
+    if "initial_lag" not in st.session_state:
+        st.session_state["initial_lag"] = 10
+    if "current_lag" not in st.session_state:
+        st.session_state["current_lag"] = 10
+    if "clean_df" not in st.session_state:
+        st.session_state["clean_df"] = None
+    if "gam_results" not in st.session_state:
+        st.session_state["gam_results"] = None
+    if "last_processed_lag" not in st.session_state:
+        st.session_state["last_processed_lag"] = None
+    if "data_source" not in st.session_state:
+        st.session_state["data_source"] = "None"
+    if "cache_metadata" not in st.session_state:
+        st.session_state["cache_metadata"] = None
+
+    # Auto-load persistent dataset if session state is empty
+    if st.session_state["raw_df"] is None:
+        cached = load_active_cache()
+        if cached is not None:
+            cached_df, cached_meta, cached_corr = cached
+            st.session_state["raw_df"] = cached_df
+            st.session_state["cache_metadata"] = cached_meta
+            st.session_state["data_source"] = cached_meta.get(
+                "source", "Restored from Local Cache"
+            )
+            opt_lag = cached_meta.get("initial_lag", 10)
+            st.session_state["initial_lag"] = opt_lag
+            st.session_state["current_lag"] = opt_lag
+            st.session_state["corr_df"] = cached_corr
+            run_pipeline(cached_df, opt_lag)
+
+
+init_session_state()
+
+
 # --- SIDEBAR CONTROLS ---
 st.sidebar.title("🚴‍♂️ Best BG Performance")
 st.sidebar.markdown(
@@ -110,11 +161,47 @@ st.sidebar.markdown(
 )
 st.sidebar.divider()
 
+# Active Dataset Banner & Cache Controls
+if st.session_state.get("raw_df") is not None:
+    cached_df = st.session_state["raw_df"]
+    meta = st.session_state.get("cache_metadata") or {}
+    source_label = meta.get("source") or st.session_state.get("data_source", "Loaded Data")
+    saved_time = meta.get("saved_at", "Current Session")
+    n_acts = (
+        cached_df["activity_id"].nunique() if "activity_id" in cached_df.columns else 1
+    )
+    total_pts = len(cached_df)
+
+    st.sidebar.markdown(
+        f"""
+        <div style="background-color: #142818; border: 1px solid #2e7d32; border-radius: 8px; padding: 12px; margin-bottom: 12px;">
+            <b style="color: #66bb6a; font-size: 14px;">💾 Active Dataset (Cached)</b><br>
+            <span style="font-size: 13px; color: #eceff1;">• <b>{total_pts:,}</b> data points ({n_acts} workouts)</span><br>
+            <span style="font-size: 12px; color: #b0bec5;">• Source: {source_label}</span><br>
+            <span style="font-size: 11px; color: #78909c;">• Saved: {saved_time}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    col_cache1, col_cache2 = st.sidebar.columns(2)
+    if col_cache1.button("🔄 Re-process", use_container_width=True, help="Re-clean data & refit GAM"):
+        run_pipeline(cached_df, st.session_state.get("current_lag", 10))
+        st.rerun()
+    if col_cache2.button("🗑️ Clear Cache", use_container_width=True, help="Remove saved dataset from disk"):
+        clear_active_cache()
+        st.session_state["raw_df"] = None
+        st.session_state["clean_df"] = None
+        st.session_state["gam_results"] = None
+        st.session_state["cache_metadata"] = None
+        st.rerun()
+
+    st.sidebar.divider()
+
 st.sidebar.subheader("1. Data Ingestion")
 data_mode = st.sidebar.radio(
     "Data Source",
     options=[
-        "Garmin Connect",
+        "Garmin Connect (Cloud)",
         "Upload .FIT Files (Direct)",
         "Intervals.icu API",
         "Demo / Synthetic Data",
@@ -177,6 +264,12 @@ if data_mode == "Garmin Connect (Cloud)":
 
                     run_pipeline(df, opt_lag)
                     n_acts = df["activity_id"].nunique() if "activity_id" in df.columns else 1
+                    save_active_cache(
+                        df,
+                        source=f"Garmin Connect ({n_acts} workouts)",
+                        initial_lag=opt_lag,
+                        corr_df=corr_df,
+                    )
                     st.sidebar.success(
                         f"Loaded {len(df):,} points across {n_acts} Garmin workouts! ({n_with_bg:,} with glucose). Optimal lag: {opt_lag} min."
                     )
@@ -215,6 +308,12 @@ elif data_mode == "Upload .FIT Files (Direct)":
                 st.session_state["corr_df"] = corr_df
 
                 run_pipeline(df, opt_lag)
+                save_active_cache(
+                    df,
+                    source=f"Uploaded FIT ({len(dfs)} files)",
+                    initial_lag=opt_lag,
+                    corr_df=corr_df,
+                )
                 st.sidebar.success(
                     f"Parsed {len(df):,} points across {len(dfs)} files ({n_with_bg:,} with glucose)! Optimal lag: {opt_lag} min."
                 )
@@ -274,6 +373,12 @@ elif data_mode == "Intervals.icu API":
 
                     run_pipeline(df, opt_lag)
                     n_acts = df["activity_id"].nunique() if "activity_id" in df.columns else 1
+                    save_active_cache(
+                        df,
+                        source=f"Intervals.icu ({n_acts} workouts)",
+                        initial_lag=opt_lag,
+                        corr_df=corr_df,
+                    )
                     st.sidebar.success(
                         f"Loaded {len(df):,} data points across {n_acts} workouts! Optimal lag: {opt_lag} min."
                     )
@@ -302,6 +407,12 @@ else:
             st.session_state["corr_df"] = corr_df
 
             run_pipeline(df, opt_lag)
+            save_active_cache(
+                df,
+                source="Demo Synthetic",
+                initial_lag=opt_lag,
+                corr_df=corr_df,
+            )
             st.sidebar.success(f"Generated {len(df):,} points! Estimated lag: {opt_lag} min.")
 
 st.sidebar.divider()
@@ -340,7 +451,7 @@ corr_df = st.session_state.get("corr_df")
 
 if raw_df is None or gam_results is None:
     st.info(
-        "👋 Welcome! Please enter your **preferred input method** or click **'⚡ Generate Demo Data'** in the sidebar to start."
+        "👋 Welcome! Please choose a data ingestion method in the sidebar or click **'🚀 Quick Launch with Demo Data'** to explore."
     )
     # Quick launch button in main area
     if st.button("🚀 Quick Launch with Demo Data", type="primary"):
@@ -352,30 +463,42 @@ if raw_df is None or gam_results is None:
         st.session_state["current_lag"] = opt_lag
         st.session_state["corr_df"] = corr_df
         run_pipeline(df, opt_lag)
+        save_active_cache(
+            df,
+            source="Demo Synthetic",
+            initial_lag=opt_lag,
+            corr_df=corr_df,
+        )
         st.rerun()
+    st.stop()
+
+if raw_df is None or clean_df is None or gam_results is None:
     st.stop()
 
 # Key metrics banner
 col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
 n_workouts = (
-    raw_df["activity_id"].nunique() if "activity_id" in raw_df.columns else 1
+    raw_df["activity_id"].nunique()
+    if raw_df is not None and "activity_id" in raw_df.columns
+    else 1
 )
 opt_lag_val = st.session_state.get("initial_lag", 0)
-r2_val = gam_results.get("r2", 0.0)
+r2_val = gam_results.get("r2", 0.0) if gam_results else 0.0
 
 col_m1.metric("Workouts Pooled", f"{n_workouts}")
-col_m2.metric("Raw Data Points", f"{len(raw_df):,}")
-col_m3.metric("Modeled Points", f"{len(clean_df):,}")
+col_m2.metric("Raw Data Points", f"{len(raw_df):,}" if raw_df is not None else "0")
+col_m3.metric("Modeled Points", f"{len(clean_df):,}" if clean_df is not None else "0")
 col_m4.metric("Estimated Optimal Lag", f"{opt_lag_val} min")
 col_m5.metric("Model Explained Var (R²)", f"{r2_val:.3f}")
 
 # Tabs
-tab1, tab2, tab3, tab4 = st.tabs(
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
     [
         "📊 Data Summary & Diagnostics",
         "🗺️ GAM 2D Heatmap",
         "📈 Optimal BG Curve",
-        "🌈 10 mg/dL Step Power Overlay",
+        "🌈 Power vs HR Overlay",
+        "⏱️ Power Curves vs Time by BG",
     ]
 )
 
@@ -493,27 +616,210 @@ with tab3:
     st.table(pd.DataFrame(zone_recs))
 
 with tab4:
-    st.subheader("Multi-Level Power Curves (10 mg/dL Steps)")
+    st.subheader("Multi-Level Power Curves: Empirical Observed vs. GAM Modeled")
     st.markdown(
-        "Comparison of 17 overlaid power curves across blood glucose concentrations from **60 to 220 mg/dL**."
+        "Analyze how cycling power shifts across glycemic tiers using both **actual observed data** "
+        "(binned by blood glucose) and the **GAM smoothed model surface**."
     )
 
-    curves = gam_results["power_curves"]
-    fig_multi = plot_multi_bg_power_curves(curves, gam_results["hr_grid"])
-    st.plotly_chart(fig_multi, use_container_width=True)
+    curve_tab1, curve_tab2 = st.tabs(
+        [
+            "📊 Empirical Observed Curves (20 mg/dL Bins)",
+            "📈 GAM Modeled Power Curves (10 mg/dL Steps)",
+        ]
+    )
 
-    # Power difference analysis
-    with st.expander("Explore Power Deltas: Optimal vs Low/High BG"):
-        hr_select = st.slider("Select Heart Rate for Glycemic Comparison", 100, 190, 150, 5)
-        hr_idx = np.where(gam_results["hr_grid"] == hr_select)[0]
-        if len(hr_idx) > 0:
-            idx = hr_idx[0]
-            bg_powers = [
-                {"Blood Glucose (mg/dL)": bg, "Predicted Power (W)": round(curves[bg][idx], 1)}
-                for bg in sorted(curves.keys())
-            ]
-            bg_df = pd.DataFrame(bg_powers)
-            max_p = bg_df["Predicted Power (W)"].max()
-            bg_df["Delta from Peak (W)"] = bg_df["Predicted Power (W)"] - max_p
+    with curve_tab1:
+        st.markdown("#### Empirical Power Output by Blood Glucose Slices")
+        st.caption(
+            "Calculates the actual mean power output observed in your telemetry across heart rate intervals, "
+            "grouped into blood glucose tiers (default: 20 mg/dL bins)."
+        )
 
-            st.dataframe(bg_df, use_container_width=True)
+        col_ctrl1, col_ctrl2, col_ctrl3 = st.columns(3)
+        bg_bin_w = col_ctrl1.selectbox(
+            "BG Bin Width (mg/dL)",
+            options=[10, 15, 20, 25, 30],
+            index=2,  # default 20 mg/dL
+            help="Width of each blood glucose interval slice.",
+        )
+        hr_bin_w = col_ctrl2.selectbox(
+            "HR Interval Width (bpm)",
+            options=[2, 3, 5, 10],
+            index=2,  # default 5 bpm
+            help="Width of each heart rate bin.",
+        )
+        min_pts_thresh = col_ctrl3.slider(
+            "Min Samples per Point",
+            min_value=3,
+            max_value=50,
+            value=15,
+            help="Minimum seconds of data required in a (BG, HR) bucket to render a point.",
+        )
+
+        fig_emp, summary_emp = plot_empirical_binned_power_curves(
+            clean_df,
+            bg_bin_width=bg_bin_w,
+            hr_bin_width=hr_bin_w,
+            min_samples=min_pts_thresh,
+        )
+        st.plotly_chart(fig_emp, use_container_width=True)
+
+        if not summary_emp.empty:
+            with st.expander("📋 View Empirical Bin Distribution & Summary Statistics"):
+                st.dataframe(summary_emp, use_container_width=True)
+
+    with curve_tab2:
+        st.markdown("#### GAM Non-Parametric Smooth Power Curves")
+        st.caption(
+            "Comparison of 17 continuous model prediction curves evaluated across blood glucose concentrations from 60 to 220 mg/dL."
+        )
+        curves = gam_results["power_curves"]
+        fig_multi = plot_multi_bg_power_curves(curves, gam_results["hr_grid"])
+        st.plotly_chart(fig_multi, use_container_width=True)
+
+        # Power difference analysis
+        with st.expander("Explore Power Deltas: Optimal vs Low/High BG"):
+            hr_select = st.slider("Select Heart Rate for Glycemic Comparison", 100, 190, 150, 5)
+            hr_idx = np.where(gam_results["hr_grid"] == hr_select)[0]
+            if len(hr_idx) > 0:
+                idx = hr_idx[0]
+                bg_powers = [
+                    {"Blood Glucose (mg/dL)": bg, "Predicted Power (W)": round(curves[bg][idx], 1)}
+                    for bg in sorted(curves.keys())
+                ]
+                bg_df = pd.DataFrame(bg_powers)
+                max_p = bg_df["Predicted Power (W)"].max()
+                bg_df["Delta from Peak (W)"] = bg_df["Predicted Power (W)"] - max_p
+
+                st.dataframe(bg_df, use_container_width=True)
+
+with tab5:
+    st.subheader("⏱️ Glycemic Power vs Time Analysis (No Heart Rate)")
+    st.markdown(
+        "Evaluate power production and endurance against **Time / Duration** stratified by blood glucose levels, "
+        "completely independent of cardiac response (Heart Rate)."
+    )
+
+    t_sub1, t_sub2, t_sub3 = st.tabs(
+        [
+            "🏆 Mean Maximal Power (Power-Duration)",
+            "⏳ Power vs Elapsed Workout Time (Fatigue)",
+            "⚡ Second-by-Second Workout Timeline",
+        ]
+    )
+
+    # Prepare shifted dataset (applying optimal or selected cgm_lag, without filtering out Heart Rate)
+    df_time_view = clean_and_shift_data(
+        raw_df,
+        lag_minutes=cgm_lag,
+        min_power=0.0,
+        min_hr=None,
+    )
+
+    with t_sub1:
+        st.markdown("#### Mean Maximal Power (MMP) Duration Curves by Blood Glucose")
+        st.caption(
+            "Calculates peak sustainable power output for standard cycling durations (1s to 60+ min) "
+            "evaluated when blood glucose falls within each glycemic bin. No Heart Rate is considered."
+        )
+
+        col_mmp1, col_mmp2, col_mmp3 = st.columns(3)
+        bg_bin_mmp = col_mmp1.selectbox(
+            "Blood Glucose Bin Width (mg/dL)",
+            options=[10, 15, 20, 25, 30],
+            index=2,  # default 20 mg/dL
+            key="mmp_bg_bin",
+            help="Glycemic bracket width for stratification.",
+        )
+        metric_choice = col_mmp2.radio(
+            "Metric Mode",
+            options=["Peak Power (Mean Maximal Power / MMP)", "Mean Sustained Power"],
+            index=0,
+            horizontal=True,
+            key="mmp_metric_choice",
+        )
+        log_scale = col_mmp3.checkbox(
+            "Logarithmic Time Axis",
+            value=True,
+            key="mmp_log_scale",
+            help="Displays duration on a logarithmic scale with standard cycling intervals (1s, 5s, 1m, 5m, 20m, 1h).",
+        )
+
+        metric_arg = "max" if "Peak" in metric_choice else "mean"
+
+        fig_mmp, pivot_mmp = plot_power_duration_by_bg(
+            df_time_view,
+            bg_bin_width=bg_bin_mmp,
+            metric=metric_arg,
+            use_log_scale=log_scale,
+            min_samples=5,
+        )
+        st.plotly_chart(fig_mmp, use_container_width=True)
+
+        if not pivot_mmp.empty:
+            with st.expander("📋 Power-Duration Comparison Table (Watts per Duration by BG Bin)"):
+                st.caption("Rows: Blood Glucose Bins | Columns: Standard Sustained Durations")
+                st.dataframe(pivot_mmp, use_container_width=True)
+
+    with t_sub2:
+        st.markdown("#### Power vs Elapsed Workout Time (Fatigue & Glycemic Fading)")
+        st.caption(
+            "Shows average power sustained as elapsed time into the ride progresses, comparing pacing and fatigue resilience across glucose tiers without Heart Rate."
+        )
+
+        col_fat1, col_fat2, col_fat3 = st.columns(3)
+        bg_bin_fat = col_fat1.selectbox(
+            "Blood Glucose Bin Width (mg/dL)",
+            options=[10, 15, 20, 25, 30],
+            index=2,
+            key="fat_bg_bin",
+        )
+        time_step_fat = col_fat2.selectbox(
+            "Elapsed Time Bin Size (minutes)",
+            options=[2, 3, 5, 10, 15],
+            index=2,  # default 5 min
+            key="fat_time_step",
+            help="Resolution of time intervals along the ride.",
+        )
+        min_p_fat = col_fat3.slider(
+            "Coasting Cutoff (Min Watts)",
+            min_value=0,
+            max_value=100,
+            value=20,
+            step=5,
+            key="fat_min_watts",
+            help="Exclude coasting or stopped seconds from average power.",
+        )
+
+        fig_fat, pivot_fat = plot_power_over_elapsed_time_by_bg(
+            df_time_view,
+            bg_bin_width=bg_bin_fat,
+            time_bin_minutes=float(time_step_fat),
+            min_power=float(min_p_fat),
+            min_samples=10,
+        )
+        st.plotly_chart(fig_fat, use_container_width=True)
+
+        if not pivot_fat.empty:
+            with st.expander("📋 Power vs Elapsed Time Comparison Table (Watts)"):
+                st.caption("Rows: Blood Glucose Bins | Columns: Time into Ride")
+                st.dataframe(pivot_fat, use_container_width=True)
+
+    with t_sub3:
+        st.markdown("#### Activity Second-by-Second Timeline: Power & Blood Glucose")
+        st.caption(
+            "Inspect raw instantaneous Power (Watts) on the primary axis alongside continuous Blood Glucose (mg/dL) on the secondary axis, without Heart Rate."
+        )
+
+        if "activity_id" in raw_df.columns and raw_df["activity_id"].nunique() > 1:
+            acts = sorted(raw_df["activity_id"].unique())
+            selected_act = st.selectbox("Select Activity to Inspect", options=acts, key="timeline_act_select")
+            act_subset = df_time_view[df_time_view["activity_id"] == selected_act]
+        else:
+            selected_act = "Pooled Telemetry"
+            act_subset = df_time_view
+
+        fig_time = plot_activity_power_bg_timeline(act_subset, activity_name=str(selected_act))
+        st.plotly_chart(fig_time, use_container_width=True)
+

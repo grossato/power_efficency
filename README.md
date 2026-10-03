@@ -212,10 +212,11 @@ The application will open in your browser at `http://localhost:8501`.
 
 | Tab | Feature | Physiological & Mathematical Description |
 | :--- | :--- | :--- |
-| **1. Data Summary & Diagnostics** | **Lag Optimization & Distributions** | Displays the cross-correlation curve over tested minute shifts $\tau \in [-30, 30]$, identifies $\tau^*$, and plots distribution statistics for power, heart rate, and blood glucose. |
+| **1. Data Summary & Diagnostics** | **Lag Optimization & Distributions** | Displays the cross-correlation curve over tested minute shifts $\tau \in [-30, 30]$, identifies $\tau^*$, and plots distribution statistics for power, heart rate, and blood glucose. Includes instant cache persistence status. |
 | **2. GAM 2D Heatmap** | **Power Landscape Surface** | 2D `go.Contour` map depicting predicted power output as a joint function of HR (X-axis) and BG (Y-axis), with the overlaid red dashed **Optimal BG Ridge Line**. |
 | **3. Optimal BG Curve** | **Zone Glycemic Targets** | Displays the optimal blood glucose trajectory as heart rate escalates, providing empirical target ranges for Zone 1 (Recovery) through Zone 5 (VO₂ Max). |
-| **4. 10 mg/dL Step Power Overlay** | **Comparative Glycemic Traces** | Overlays 17 individual power curves ($60\text{–}220\text{ mg/dL}$) colored continuously from deep blue to bright red, quantifying the wattage deficit between optimal fueling and hypoglycemia/hyperglycemia. |
+| **4. Power vs HR Overlay** | **Binned & Modeled Power Curves** | Dual-view panel featuring: (1) Empirical observed power curves binned by blood glucose (default 20 mg/dL bins) and HR intervals, and (2) 17 continuous GAM modeled power curves ($60\text{–}220\text{ mg/dL}$) with interactive wattage delta analysis. |
+| **5. Power Curves vs Time by BG** | **Glycemic Power-Duration & Fatigue (No HR)** | Independent of cardiac response (no HR): (1) **Mean Maximal Power (MMP)** curves across standard durations (1s to 60+ min) per 20 mg/dL BG bin, (2) **Power vs Elapsed Workout Time** analyzing fatigue and pacing resilience, and (3) **Second-by-second Activity Timelines** with dual power/glucose axes. |
 
 ---
 
